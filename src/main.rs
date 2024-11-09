@@ -1,10 +1,10 @@
-use crate::ServerError::ParseError;
 use log::log;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
+use std::{thread, time};
 
-#[derive(Debug)]
+#[derive(Debug, Eq, Hash, PartialEq, Copy, Clone)]
 enum HttpMethods {
     Get,
 }
@@ -19,19 +19,25 @@ struct Request<'a> {
     method: HttpMethods,
     url: &'a str,
     path: &'a str,
+    stream: TcpStream,
 }
 
-impl<'a> TryFrom<&'a str> for Request<'a> {
-    type Error = ServerError;
+impl<'a> Request<'a> {
+    fn parse(mut stream: TcpStream, read_buffer: &'a mut [u8]) -> Result<Self, ServerError> {
+        let read_amount = stream.read(read_buffer).unwrap();
+        println!("Read this much: {}", read_amount);
 
-    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
-        let first_line = value
+        let read_str = std::str::from_utf8(&read_buffer[0..read_amount]).unwrap();
+        // println!("{}", read_str);
+
+        let first_line = read_str
             .lines()
             .next()
             .ok_or(ServerError::ParseError("Couldn't get first line".into()))?;
 
         let mut request = Request {
             method: HttpMethods::Get,
+            stream,
             url: "",
             path: "",
         };
@@ -72,12 +78,11 @@ impl<'a> TryFrom<&'a str> for Request<'a> {
     }
 }
 
-type Handler = fn(stream: &mut std::net::TcpStream, req: Request) -> ();
+type Handler = fn(req: Request) -> ();
 
 struct Server {
     listener: TcpListener,
-    routes: HashMap<String, Handler>,
-    read_buffer: [u8; 2048],
+    routes: HashMap<(String, HttpMethods), Handler>,
     not_found_handler: Handler,
 }
 
@@ -85,27 +90,21 @@ impl Server {
     fn new(addr: &str) -> Self {
         let listener = TcpListener::bind(addr).unwrap();
         let routes = HashMap::new();
-        let read_buffer = [0; 2048];
 
         Self {
             not_found_handler: handle_not_found,
             listener,
             routes,
-            read_buffer,
         }
     }
 
     fn process_requests(&mut self) {
+        let mut read_buffer = [0; 2048];
+
         for stream in self.listener.incoming() {
             match stream {
-                Ok(mut stream) => {
-                    let read_amount = stream.read(&mut self.read_buffer).unwrap();
-                    println!("Read this much: {}", read_amount);
-
-                    let read_str = std::str::from_utf8(&self.read_buffer[0..read_amount]).unwrap();
-                    // println!("{}", read_str);
-
-                    let request = match Request::try_from(read_str) {
+                Ok(stream) => {
+                    let request = match Request::parse(stream, &mut read_buffer) {
                         Ok(request) => request,
                         Err(e) => {
                             log!(log::Level::Error, "{:?}", e);
@@ -113,14 +112,16 @@ impl Server {
                         }
                     };
 
-                    let handler = self.routes.get(request.path);
+                    thread::sleep(time::Duration::from_secs(10));
+                    
+                    let handler = self.routes.get(&(request.path.to_string(), request.method));
                     if handler.is_none() {
-                        (self.not_found_handler)(&mut stream, request);
+                        (self.not_found_handler)(request);
                         continue;
                     }
 
                     let handler = handler.unwrap();
-                    handler(&mut stream, request);
+                    handler(request);
                 }
 
                 Err(e) => {
@@ -130,12 +131,12 @@ impl Server {
         }
     }
 
-    fn register_route(&mut self, route: String, handler: Handler) {
-        self.routes.insert(route, handler);
+    fn register_route(&mut self, http_method: HttpMethods, route: String, handler: Handler) {
+        self.routes.insert((route, http_method), handler);
     }
 }
 
-fn handle_home(stream: &mut std::net::TcpStream, req: Request) {
+fn handle_home(mut req: Request) {
     let html_response = include_str!("./public/index.html");
 
     let response_buffer = format!(
@@ -144,10 +145,10 @@ fn handle_home(stream: &mut std::net::TcpStream, req: Request) {
         html_response
     );
 
-    stream.write_all(response_buffer.as_bytes()).unwrap()
+    req.stream.write_all(response_buffer.as_bytes()).unwrap()
 }
 
-fn handle_not_found(stream: &mut std::net::TcpStream, req: Request) {
+fn handle_not_found(mut req: Request) {
     let html_response = include_str!("./public/404.html");
 
     let response_buffer = format!(
@@ -156,12 +157,12 @@ fn handle_not_found(stream: &mut std::net::TcpStream, req: Request) {
         html_response
     );
 
-    stream.write_all(response_buffer.as_bytes()).unwrap()
+    req.stream.write_all(response_buffer.as_bytes()).unwrap()
 }
 
 fn main() {
     let mut server = Server::new("127.0.0.1:3000");
-    server.register_route("/".to_string(), handle_home);
+    server.register_route(HttpMethods::Get, "/".to_string(), handle_home);
 
     println!("Listening on port 3000!");
     server.process_requests();
