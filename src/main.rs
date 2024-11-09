@@ -111,9 +111,6 @@ impl Server {
                             continue;
                         }
                     };
-
-                    thread::sleep(time::Duration::from_secs(10));
-                    
                     let handler = self.routes.get(&(request.path.to_string(), request.method));
                     if handler.is_none() {
                         (self.not_found_handler)(request);
